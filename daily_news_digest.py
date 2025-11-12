@@ -57,7 +57,7 @@ FEEDS = {
         "https://www.nasdaq.com/feed/rssoutbound?category=Market-News"
     ],
     "Cryptocurrency": [
-        "https://www.nasdaq.com/feed/rssoutbound?category=Cryptocurrencies",
+        "https://www.nasdaq.com/feed/rssoutbound?category=Cryptocurrencies"
     ],
     "Global-Politics": [
         "https://www.crisisgroup.org/rss"
@@ -67,7 +67,7 @@ FEEDS = {
     ],
     "French-Politics": [
         "https://www.crisisgroup.org/rss/169"
-    ],
+    ]
 }
 
 # Summarization constraints
@@ -129,16 +129,24 @@ def extract_article_text(url: str) -> Tuple[str,str]:
         return "", ""
     
 def safe_summarize_hf(text: str) -> str:
-    MAX_CHARS = 3000  # heuristic: adjust based on experience
+    MAX_CHARS = 3000
     if len(text) > MAX_CHARS:
-        # simple chunking: split on sentences or fixed chunks
-        parts = [ text[i:i+MAX_CHARS] for i in range(0, len(text), MAX_CHARS) ]
-        summaries = [ summarize_hf_api(p) for p in parts ]
-        merged = "\n".join(summaries)
-        # then summarize merged result to shorten
-        return summarize_hf_api(merged)
+        parts = [text[i:i+MAX_CHARS] for i in range(0, len(text), MAX_CHARS)]
+        summaries = []
+        for p in parts:
+            try:
+                summaries.append(summarize_hf_api(p))
+            except Exception as e:
+                print(f"⚠️  Partial summarization failed: {e}")
+                summaries.append("")
+        merged = "\n".join([s for s in summaries if s.strip()])
+        return summarize_hf_api(merged) if merged else "[Summary unavailable]"
     else:
-        return summarize_hf_api(text)
+        try:
+            return summarize_hf_api(text)
+        except Exception as e:
+            print(f"⚠️  Summarization failed: {e}")
+            return "[Summary unavailable]"
 
 
 def summarize_local(text: str) -> str:
@@ -156,23 +164,36 @@ def summarize_local(text: str) -> str:
         parts.append(out[0]['summary_text'].strip())
     return " ".join(parts)
 
-def summarize_hf_api(text: str) -> str:
+def summarize_hf_api(text: str, max_retries: int = 3) -> str:
     API_URL = f"https://router.huggingface.co/hf-inference/models/{HF_SUMMARIZER_MODEL}"
     headers = {"Authorization": f"Bearer {HF_API_TOKEN}"} if HF_API_TOKEN else {}
-    payload = {"inputs": text, "parameters": {"max_new_tokens": 120, "min_length": 30}}
-    resp = requests.post(API_URL, headers=headers, json=payload, timeout=30)
-    if resp.status_code != 200:
-        # graceful fallback: return first 400 chars
-        print("HF API error", resp.status_code, resp.text[:200])
-        return textwrap.shorten(text, width=400)
-    data = resp.json()
-    if isinstance(data, dict) and data.get("error"):
-        print("HF error:", data.get("error"))
-        return textwrap.shorten(text, width=400)
-    # data may be list of dicts
-    if isinstance(data, list) and isinstance(data[0], dict):
-        return data[0].get("summary_text", "") or data[0].get("generated_text", "")
-    return str(data)
+    payload = {"inputs": text[:3000], "parameters": {"max_new_tokens": 120, "min_length": 30}}
+
+    for attempt in range(max_retries):
+        try:
+            resp = requests.post(API_URL, headers=headers, json=payload, timeout=(5, 30))
+            resp.raise_for_status()
+            data = resp.json()
+            if isinstance(data, list) and isinstance(data[0], dict):
+                return data[0].get("summary_text") or data[0].get("generated_text", "")
+            elif isinstance(data, dict):
+                if data.get("error"):
+                    print(f"HF error: {data['error']}")
+                    return textwrap.shorten(text, width=400)
+                return data.get("summary_text", str(data))
+            return str(data)
+        except requests.exceptions.ReadTimeout:
+            print(f"⚠️  HF API timeout (attempt {attempt+1}/{max_retries}), retrying...")
+            time.sleep(5)
+        except requests.exceptions.RequestException as e:
+            print(f"⚠️  HF API request failed: {e}")
+            time.sleep(5)
+        except Exception as e:
+            print(f"⚠️  Unexpected summarization error: {e}")
+            break
+
+    print("🚫 Summarization failed after retries, skipping.")
+    return "[Summary unavailable due to API timeout]"
 
 def summarize(text: str) -> str:
     if not text.strip():
@@ -216,10 +237,10 @@ def collect_and_send():
     for cat, feed_list in FEEDS.items():
         seen = 0
         for feed in feed_list:
-            print(f"Fetching feed: {feed}")
+            print(f"Fetching feed {cat} from: {feed}") 
             try:
                 entries = fetch_feed_entries(feed)
-                print(f" ------------- found {len(entries)} entries")
+                print(f" -------------> Found {len(entries)} entries")
             except Exception as e:
                 print("feed fetch failed", feed, e)
                 continue

@@ -2,7 +2,6 @@
 """
 daily_news_digest.py
 Simple daily news collector -> summarizer -> email sender.
-Change configuration in CONFIG dictionary below.
 """
 
 from dotenv import load_dotenv
